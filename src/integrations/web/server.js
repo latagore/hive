@@ -10,6 +10,27 @@ const git = require('../../core/git');
 const RemoteNode = require('../../core/remote-node');
 
 /**
+ * Find the Tailscale interface IP (100.64.0.0/10 CGNAT range).
+ * Returns the IP string or null if Tailscale isn't active.
+ */
+function getTailscaleIp() {
+  const ifaces = os.networkInterfaces();
+  for (const addrs of Object.values(ifaces)) {
+    for (const addr of addrs) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        const first = parseInt(addr.address.split('.')[0]);
+        const second = parseInt(addr.address.split('.')[1]);
+        // 100.64.0.0/10 = 100.64.x.x through 100.127.x.x
+        if (first === 100 && second >= 64 && second <= 127) {
+          return addr.address;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Scan a directory for Claude command .md files and parse frontmatter.
  * Returns array of { name, description }.
  */
@@ -93,6 +114,15 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
 
+  // Second server bound to Tailscale interface (if available)
+  let tsServer = null;
+  let tsWss = null;
+  const tsIp = getTailscaleIp();
+  if (tsIp) {
+    tsServer = http.createServer(app);
+    tsWss = new WebSocketServer({ server: tsServer });
+  }
+
   // Discover available slash commands
   const commands = discoverCommands(config);
 
@@ -105,7 +135,7 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
 
   // -- WebSocket handling -----------------------------------------------
 
-  wss.on('connection', (ws) => {
+  function handleWsConnection(ws) {
     let authenticated = false;
     let isWorker = false;
 
@@ -219,7 +249,10 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         workers.delete(ws);
       }
     });
-  });
+  }
+
+  wss.on('connection', handleWsConnection);
+  if (tsWss) tsWss.on('connection', handleWsConnection);
 
   // -- Message handlers --------------------------------------------------
 
@@ -749,31 +782,38 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
 
   // -- Start server -------------------------------------------------------
 
-  server.listen(port, () => {
-    console.log(`Web dashboard: http://localhost:${port}`);
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`Web dashboard: http://127.0.0.1:${port}`);
     if (workerSecret) {
-      console.log(`Worker registration enabled (workers connect to ws://localhost:${port})`);
+      console.log(`Worker registration enabled (workers connect to ws://127.0.0.1:${port})`);
     }
   });
 
+  if (tsServer) {
+    tsServer.listen(port, tsIp, () => {
+      console.log(`Web dashboard (tailscale): http://${tsIp}:${port}`);
+    });
+  }
+
   // Cleanup helper
-  server.on('close', () => {
+  function cleanup() {
     clearInterval(fleetInterval);
     for (const ws of clients) {
       clearTermSub(ws);
       ws.close();
     }
     clients.clear();
-    // Clean up worker connections
     for (const [ws, node] of workers) {
       node.disconnect();
       router.removeNode(node.id);
       ws.close();
     }
     workers.clear();
-  });
+  }
+  server.on('close', cleanup);
+  if (tsServer) tsServer.on('close', cleanup);
 
-  return { app, server, wss };
+  return { app, server, tsServer, wss };
 }
 
 module.exports = { createWebServer };
