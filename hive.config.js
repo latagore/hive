@@ -14,6 +14,9 @@ module.exports = {
     // Which pane index runs Claude Code (depends on your tmux layout)
     claudePane: 0,
 
+    // Set to true if Claude Code is configured with vim keybindings
+    vimMode: false,
+
     // Fixed session roles (optional, for display)
     roles: {
       1: 'Reviews',
