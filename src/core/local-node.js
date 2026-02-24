@@ -1,62 +1,55 @@
-const { exec: cpExec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(cpExec);
+const fs = require('fs');
+const tmux = require('./tmux');
 
 /**
- * Local node — executes commands on the local machine.
- * Implements the same interface as RemoteNode so server.js can use either.
+ * LocalNode wraps tmux.js in an async Node interface.
+ * Executes all operations locally on this machine.
  */
 class LocalNode {
-  constructor() {
-    this.id = 'local';
+  constructor(id = 'local') {
+    this.id = id;
     this.type = 'local';
-    this.connected = true;
   }
 
-  async exec(cmd) {
+  async exec(cmd, opts) {
+    return tmux.exec(cmd, opts);
+  }
+
+  async listSessions() {
+    return tmux.listSessions();
+  }
+
+  async capturePane(target, opts) {
+    return tmux.capturePane(target, opts);
+  }
+
+  async sendKeys(target, keys, enter) {
+    return tmux.sendKeys(target, keys, enter);
+  }
+
+  async hasSession(name) {
+    return tmux.hasSession(name);
+  }
+
+  async killSession(name) {
+    return tmux.killSession(name);
+  }
+
+  async readFile(filePath) {
     try {
-      const { stdout } = await execAsync(cmd, { encoding: 'utf8', timeout: 10000 });
-      return stdout;
+      return fs.readFileSync(filePath, 'utf8');
     } catch {
-      return '';
+      return null;
     }
   }
 
-  async capturePane(target, { lines } = {}) {
-    const scrollback = lines ? `-S -${lines}` : '';
-    const result = await this.exec(`tmux capture-pane -t "${target}" -p ${scrollback} 2>/dev/null`);
-    return result || '';
+  async fileExists(filePath) {
+    return fs.existsSync(filePath);
   }
 
-  async sendKeys(target, keys, enter = true) {
-    const oneLine = keys.replace(/\r?\n+/g, ' — ');
-    const escaped = oneLine.replace(/'/g, "'\\''");
-    await this.exec(`tmux send-keys -t "${target}" -l '${escaped}'`);
-    if (enter) await this.exec(`tmux send-keys -t "${target}" Enter`);
+  async gitInfo(repoDir) {
+    return tmux.gitInfo(repoDir);
   }
-
-  disconnect() {}
 }
 
-/**
- * Local router — always returns the local node.
- * Used when hive runs on a single machine without remote workers.
- */
-class LocalRouter {
-  constructor() {
-    this.node = new LocalNode();
-  }
-
-  getNode(_id) {
-    return this.node;
-  }
-
-  nodeFor(_sessionName) {
-    return this.node;
-  }
-
-  addNode() {}
-  removeNode() {}
-}
-
-module.exports = { LocalNode, LocalRouter };
+module.exports = LocalNode;

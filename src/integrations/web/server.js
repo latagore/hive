@@ -10,24 +10,36 @@ const git = require('../../core/git');
 const RemoteNode = require('../../core/remote-node');
 
 /**
- * Find the Tailscale interface IP (100.64.0.0/10 CGNAT range).
- * Returns the IP string or null if Tailscale isn't active.
+ * Detect the Tailscale interface IP address.
+ * Tailscale uses the CGNAT range: 100.64.0.0/10
  */
-function getTailscaleIp() {
-  const ifaces = os.networkInterfaces();
-  for (const addrs of Object.values(ifaces)) {
+function getTailscaleIP() {
+  const interfaces = os.networkInterfaces();
+  for (const addrs of Object.values(interfaces)) {
     for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal) {
-        const first = parseInt(addr.address.split('.')[0]);
-        const second = parseInt(addr.address.split('.')[1]);
-        // 100.64.0.0/10 = 100.64.x.x through 100.127.x.x
-        if (first === 100 && second >= 64 && second <= 127) {
+        const octets = addr.address.split('.').map(Number);
+        if (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) {
           return addr.address;
         }
       }
     }
   }
   return null;
+}
+
+/**
+ * Determine which hosts to bind the web server to.
+ * Defaults to 127.0.0.1 + Tailscale IP (if available).
+ * Override with WEB_BIND env var (comma-separated).
+ */
+function getBindHosts() {
+  const bindEnv = process.env.WEB_BIND;
+  if (bindEnv) return bindEnv.split(',').map(h => h.trim());
+  const hosts = ['127.0.0.1'];
+  const tsIP = getTailscaleIP();
+  if (tsIP) hosts.push(tsIP);
+  return hosts;
 }
 
 /**
@@ -86,7 +98,10 @@ function discoverCommands(config) {
  * -S -500 captures 500 lines of scrollback history.
  */
 async function capturePaneAnsi(node, target) {
-  return await node.exec(`tmux capture-pane -e -p -S -500 -t "${target}" 2>/dev/null`) || '';
+  const content = await node.exec(`tmux capture-pane -e -p -S -500 -t "${target}" 2>/dev/null`) || '';
+  const colsStr = await node.exec(`tmux display-message -p -t "${target}" "#{pane_width}" 2>/dev/null`);
+  const cols = parseInt(colsStr) || 0;
+  return { content, cols };
 }
 
 /**
@@ -96,7 +111,7 @@ async function capturePaneAnsi(node, target) {
  * @param {TaskQueue} taskQueue - task queue instance
  * @param {ProjectManager} pmManager
  * @param {NodeRouter} router
- * @returns {{ app, server, wss }}
+ * @returns {{ app, servers, wss, close }}
  */
 function createWebServer(config, watcher, taskQueue, pmManager, router) {
   const port = parseInt(process.env.WEB_PORT) || 3000;
@@ -111,17 +126,7 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
   const app = express();
   app.use(express.static(path.join(__dirname, 'public')));
 
-  const server = http.createServer(app);
-  const wss = new WebSocketServer({ server });
-
-  // Second server bound to Tailscale interface (if available)
-  let tsServer = null;
-  let tsWss = null;
-  const tsIp = getTailscaleIp();
-  if (tsIp) {
-    tsServer = http.createServer(app);
-    tsWss = new WebSocketServer({ server: tsServer });
-  }
+  const wss = new WebSocketServer({ noServer: true });
 
   // Discover available slash commands
   const commands = discoverCommands(config);
@@ -176,6 +181,10 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
             ws.send(JSON.stringify({ type: 'feed:entries', entries: feedData.entries, hasMore: feedData.hasMore }));
             ws.send(JSON.stringify({ type: 'rules:list', rules: taskQueue.getRules() }));
             ws.send(JSON.stringify({ type: 'designations:status', designations: taskQueue.getDesignations() }));
+            ws.send(JSON.stringify({ type: 'vim:status', enabled: taskQueue.vimMode }));
+            ws.send(JSON.stringify({ type: 'designationDefs:list', defs: taskQueue.getDesignationDefs() }));
+            ws.send(JSON.stringify({ type: 'agentRoots:list', roots: taskQueue.getAgentRoots() }));
+            ws.send(JSON.stringify({ type: 'agentFiles:list', files: taskQueue.agentFilesList }));
           }
           if (pmManager) {
             ws.send(JSON.stringify({ type: 'pm:list', pms: pmManager.getAll() }));
@@ -252,7 +261,6 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
   }
 
   wss.on('connection', handleWsConnection);
-  if (tsWss) tsWss.on('connection', handleWsConnection);
 
   // -- Message handlers --------------------------------------------------
 
@@ -271,8 +279,8 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         const { name, nodeId } = found;
         const node = router.getNode(nodeId);
         const paneTarget = `${name}:.${config.sessions.claudePane}`;
-        const content = await capturePaneAnsi(node, paneTarget);
-        ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content }));
+        const { content: peekContent, cols: peekCols } = await capturePaneAnsi(node, paneTarget);
+        ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content: peekContent, cols: peekCols }));
         break;
       }
 
@@ -287,8 +295,8 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
           if (!node) return;
           const paneTarget = `${s.name}:.${config.sessions.claudePane}`;
           try {
-            const content = await capturePaneAnsi(node, paneTarget);
-            const plain = content.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+            const { content: searchContent } = await capturePaneAnsi(node, paneTarget);
+            const plain = searchContent.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
             if (plain.toLowerCase().includes(queryLower)) {
               // Extract matching lines for context
               const matchLines = plain.split('\n')
@@ -320,14 +328,14 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
           await node.exec(`tmux resize-pane -t "${paneTarget}" -x ${msg.cols} -y ${msg.rows} 2>/dev/null`);
         }
         // Send immediately
-        const content = await capturePaneAnsi(node, paneTarget);
-        ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content }));
+        const { content: subContent, cols: subCols } = await capturePaneAnsi(node, paneTarget);
+        ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content: subContent, cols: subCols }));
         // Poll every 2s
         const interval = setInterval(async () => {
           if (ws.readyState !== 1) { clearTermSub(ws); return; }
           try {
-            const data = await capturePaneAnsi(node, paneTarget);
-            ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content: data }));
+            const { content: pollContent, cols: pollCols } = await capturePaneAnsi(node, paneTarget);
+            ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content: pollContent, cols: pollCols }));
           } catch {
             // Node may have disconnected
           }
@@ -362,6 +370,7 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
             if (ws.readyState !== 1) return;
             ws.send(JSON.stringify({ type: 'ask:stream', session: msg.session, content, final: isFinal }));
           },
+          vimMode: taskQueue ? taskQueue.vimMode : false,
         }).then((result) => {
           if (ws.readyState !== 1) return;
           ws.send(JSON.stringify({
@@ -384,7 +393,7 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         }
         const { name, nodeId } = found;
         const node = router.getNode(nodeId);
-        relay.tell(config, node, name, msg.message).then((result) => {
+        relay.tell(config, node, name, msg.message, { vimMode: taskQueue ? taskQueue.vimMode : false }).then((result) => {
           if (ws.readyState !== 1) return;
           ws.send(JSON.stringify({
             type: 'tell:done',
@@ -412,6 +421,7 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         const node = router.getNode(nodeId);
         const paneTarget = `${name}:.${config.sessions.claudePane}`;
         // msg.keys is an array of tmux key names, e.g. ["Enter"], ["Up"], ["Escape"]
+        // Keys bar buttons always send raw — vim preamble only applies to typed text (ask/tell)
         for (const key of (msg.keys || [])) {
           await node.exec(`tmux send-keys -t "${paneTarget}" ${key}`);
         }
@@ -518,10 +528,35 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         break;
       }
 
+      case 'task:attach': {
+        if (!taskQueue) break;
+        const task = taskQueue.attachTask(msg.text, msg.session, msg.meta);
+        broadcast({ type: 'task:created', task });
+        broadcast({ type: 'task:dispatched', task });
+        ws.send(JSON.stringify({ type: 'task:attached', task }));
+        break;
+      }
+
+      case 'task:update': {
+        if (!taskQueue) break;
+        const updatedTask = taskQueue.updateTask(msg.taskId, msg.updates || {});
+        if (updatedTask) broadcast({ type: 'task:updated', task: updatedTask });
+        break;
+      }
+
+      case 'task:snapshot': {
+        if (!taskQueue) break;
+        const snapTask = taskQueue.tasks.get(msg.taskId);
+        if (snapTask && snapTask.snapshot) {
+          ws.send(JSON.stringify({ type: 'task:snapshot', taskId: msg.taskId, content: snapTask.snapshot, cols: snapTask.snapshotCols || 0 }));
+        }
+        break;
+      }
+
       case 'task:cancel': {
         if (!taskQueue) break;
-        const task = taskQueue.cancelTask(msg.taskId);
-        if (task) broadcast({ type: 'task:cancelled', task });
+        const cancelledTask = taskQueue.cancelTask(msg.taskId);
+        if (cancelledTask) broadcast({ type: 'task:cancelled', task: cancelledTask });
         break;
       }
 
@@ -578,6 +613,53 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
       case 'designation:set': {
         if (!taskQueue) break;
         taskQueue.setDesignation(msg.session, msg.designation);
+        break;
+      }
+
+      case 'designationDef:set': {
+        if (!taskQueue) break;
+        taskQueue.setDesignationDef(msg.name, { agentFiles: msg.agentFiles, description: msg.description });
+        break;
+      }
+
+      case 'designationDef:remove': {
+        if (!taskQueue) break;
+        taskQueue.removeDesignationDef(msg.name);
+        break;
+      }
+
+      case 'designationDefs:get': {
+        if (!taskQueue) break;
+        ws.send(JSON.stringify({ type: 'designationDefs:list', defs: taskQueue.getDesignationDefs() }));
+        break;
+      }
+
+      case 'agentRoots:set': {
+        if (!taskQueue) break;
+        taskQueue.setAgentRoots(msg.roots);
+        taskQueue.scanAgentFiles();
+        ws.send(JSON.stringify({ type: 'agentFiles:list', files: taskQueue.agentFilesList }));
+        break;
+      }
+
+      case 'agentFiles:scan': {
+        if (!taskQueue) break;
+        const files = taskQueue.scanAgentFiles();
+        ws.send(JSON.stringify({ type: 'agentFiles:list', files }));
+        break;
+      }
+
+      case 'agentFiles:get': {
+        if (!taskQueue) break;
+        ws.send(JSON.stringify({ type: 'agentFiles:list', files: taskQueue.agentFilesList }));
+        break;
+      }
+
+      // -- VIM mode messages -------------------------------------------------
+      case 'vim:toggle': {
+        if (!taskQueue) break;
+        taskQueue.setVimMode(msg.enabled);
+        broadcast({ type: 'vim:status', enabled: taskQueue.vimMode });
         break;
       }
 
@@ -799,12 +881,17 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
     taskQueue.on('task:completed', (task) => broadcast({ type: 'task:completed', task }));
     taskQueue.on('task:failed', (task) => broadcast({ type: 'task:failed', task }));
     taskQueue.on('task:cancelled', (task) => broadcast({ type: 'task:cancelled', task }));
+    taskQueue.on('task:updated', (task) => broadcast({ type: 'task:updated', task }));
     taskQueue.on('auto:changed', (sessions) => broadcast({ type: 'auto:status', sessions }));
     taskQueue.on('feed:new', (entry) => broadcast({ type: 'feed:new', entry }));
     taskQueue.on('approval:new', (approval) => broadcast({ type: 'approval:new', approval }));
     taskQueue.on('approval:resolved', (approval) => broadcast({ type: 'approval:resolved', approval }));
     taskQueue.on('rules:changed', (rules) => broadcast({ type: 'rules:list', rules }));
     taskQueue.on('designations:changed', (designations) => broadcast({ type: 'designations:status', designations }));
+    taskQueue.on('designationDefs:changed', (defs) => broadcast({ type: 'designationDefs:list', defs }));
+    taskQueue.on('agentRoots:changed', (roots) => broadcast({ type: 'agentRoots:list', roots }));
+    taskQueue.on('agentFiles:scanned', (files) => broadcast({ type: 'agentFiles:list', files }));
+    taskQueue.on('vim:changed', (enabled) => broadcast({ type: 'vim:status', enabled }));
   }
 
   if (pmManager) {
@@ -812,23 +899,43 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
     pmManager.on('pm:changed', () => broadcast({ type: 'pm:list', pms: pmManager.getAll() }));
   }
 
-  // -- Start server -------------------------------------------------------
+  // -- Start servers (localhost + Tailscale only) ---------------------------
 
-  server.listen(port, '127.0.0.1', () => {
-    console.log(`Web dashboard: http://127.0.0.1:${port}`);
-    if (workerSecret) {
-      console.log(`Worker registration enabled (workers connect to ws://127.0.0.1:${port})`);
-    }
-  });
+  const bindHosts = getBindHosts();
+  const servers = [];
 
-  if (tsServer) {
-    tsServer.listen(port, tsIp, () => {
-      console.log(`Web dashboard (tailscale): http://${tsIp}:${port}`);
+  for (const host of bindHosts) {
+    const httpServer = http.createServer(app);
+    httpServer.on('upgrade', (request, socket, head) => {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
     });
+    httpServer.listen(port, host, () => {
+      console.log(`Web dashboard: http://${host}:${port}`);
+    });
+    servers.push(httpServer);
   }
 
-  // Cleanup helper
-  function cleanup() {
+  if (workerSecret) {
+    console.log(`Worker registration enabled on port ${port}`);
+  }
+
+  // Initial agent file scan on startup
+  if (taskQueue && taskQueue.agentRoots.length > 0) {
+    taskQueue.scanAgentFiles();
+    console.log(`Scanned ${taskQueue.agentFilesList.length} agent files from ${taskQueue.agentRoots.length} root(s)`);
+  }
+
+  const tsIP = getTailscaleIP();
+  if (tsIP) {
+    console.log(`Tailscale access enabled (${tsIP})`);
+  } else if (!process.env.WEB_BIND) {
+    console.log('No Tailscale interface found — dashboard is localhost-only');
+  }
+
+  // Cleanup
+  function close() {
     clearInterval(fleetInterval);
     for (const ws of clients) {
       clearTermSub(ws);
@@ -841,11 +948,10 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
       ws.close();
     }
     workers.clear();
+    for (const s of servers) s.close();
   }
-  server.on('close', cleanup);
-  if (tsServer) tsServer.on('close', cleanup);
 
-  return { app, server, tsServer, wss };
+  return { app, servers, wss, close };
 }
 
 module.exports = { createWebServer };

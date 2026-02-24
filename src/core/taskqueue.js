@@ -2,7 +2,9 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 const relay = require('./relay');
 const fleet = require('./fleet');
 
@@ -29,6 +31,12 @@ class TaskQueue extends EventEmitter {
     this.activeTaskBySession = new Map(); // session num -> task id
     this.lastDispatchedAt = new Map();   // session num -> timestamp of last task dispatch
     this.spawnedAgents = new Map();  // slot num -> { repoDir, name }
+    this.vimMode = false;
+
+    // Designation definitions + agent file scanning
+    this.designationDefs = new Map(); // name → { name, agentFiles: [], description: '' }
+    this.agentRoots = [];             // array of scan paths (e.g. '~/dev/agents/')
+    this.agentFilesList = [];         // cached scan results: [{ path, name, relativePath, root }]
 
     // Auto-pilot rules
     this.rules = [
@@ -55,7 +63,7 @@ class TaskQueue extends EventEmitter {
 
   // -- Task lifecycle -----------------------------------------------
 
-  createTask(text, mode, targetSession, designation) {
+  createTask(text, mode, targetSession, designation, meta) {
     const task = {
       id: String(nextTaskId++),
       text,
@@ -68,6 +76,9 @@ class TaskQueue extends EventEmitter {
       dispatchedAt: null,
       completedAt: null,
       result: null,
+      source: (meta && meta.source) || null,   // e.g. 'ci-fail', 'review-changes'
+      sourcePR: (meta && meta.pr) || null,      // PR number that triggered this
+      sourceSession: (meta && meta.session) || null, // session that triggered this
     };
     this.tasks.set(task.id, task);
     this.emit('task:created', task);
@@ -85,6 +96,51 @@ class TaskQueue extends EventEmitter {
     return task;
   }
 
+  /**
+   * Attach a tracking task to an already-working session.
+   * No dispatch, no /clear, no relay — just bookkeeping.
+   */
+  attachTask(text, sessionNum, meta) {
+    const task = {
+      id: String(nextTaskId++),
+      text,
+      mode: 'manual',
+      targetSession: sessionNum,
+      designation: null,
+      status: 'dispatched',
+      assignedTo: sessionNum,
+      createdAt: Date.now(),
+      dispatchedAt: Date.now(),
+      lastActivityAt: Date.now(),
+      completedAt: null,
+      result: null,
+      source: (meta && meta.source) || 'attached',
+      sourcePR: (meta && meta.pr) || null,
+      sourceSession: sessionNum,
+    };
+    this.tasks.set(task.id, task);
+    this.activeTaskBySession.set(sessionNum, task.id);
+    this.dispatchLock.add(sessionNum);
+    this.emit('task:created', task);
+    this.emit('task:dispatched', task);
+    this.pushFeed('task', sessionNum, `Task attached to session ${sessionNum}: "${text}"`);
+    this._saveState();
+    return task;
+  }
+
+  updateTask(taskId, updates) {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== 'queued') return null;
+
+    const allowed = ['text', 'mode', 'targetSession', 'designation'];
+    for (const key of allowed) {
+      if (key in updates) task[key] = updates[key];
+    }
+    this.emit('task:updated', task);
+    this._saveState();
+    return task;
+  }
+
   cancelTask(taskId) {
     const task = this.tasks.get(taskId);
     if (!task || task.status === 'completed' || task.status === 'failed') return null;
@@ -98,13 +154,15 @@ class TaskQueue extends EventEmitter {
     return task;
   }
 
-  completeTask(taskId, result) {
+  completeTask(taskId, result, snapshot, snapshotCols) {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'dispatched') return null;
 
     task.status = 'completed';
     task.completedAt = Date.now();
     task.result = result || null;
+    task.snapshot = snapshot || null;
+    task.snapshotCols = snapshotCols || 0;
 
     if (task.assignedTo) {
       this.activeTaskBySession.delete(task.assignedTo);
@@ -168,6 +226,7 @@ class TaskQueue extends EventEmitter {
     task.status = 'dispatched';
     task.assignedTo = sessionNum;
     task.dispatchedAt = Date.now();
+    task.lastActivityAt = Date.now();
     this.activeTaskBySession.set(sessionNum, task.id);
     this.lastDispatchedAt.set(sessionNum, Date.now());
 
@@ -180,12 +239,25 @@ class TaskQueue extends EventEmitter {
     // For auto-dispatched tasks, clear context first so the agent starts fresh
     const sendTask = async () => {
       if (task.mode === 'auto') {
-        const clearResult = await relay.tell(this.config, node, sessionName, '/clear');
+        const clearResult = await relay.tell(this.config, node, sessionName, '/clear', { vimMode: this.vimMode });
         if (clearResult.success) {
           await new Promise(r => setTimeout(r, 2500));
         }
       }
-      return relay.tell(this.config, node, sessionName, task.text);
+      // Build message with agent file preamble if designation has agent files
+      let fullMessage = task.text;
+      const desigName = task.designation || this.designations.get(sessionNum);
+      const desigDef = desigName ? this.designationDefs.get(desigName) : null;
+      if (desigDef && desigDef.agentFiles && desigDef.agentFiles.length > 0) {
+        const parts = [];
+        for (const f of desigDef.agentFiles) {
+          try { parts.push(fs.readFileSync(f, 'utf8')); } catch {}
+        }
+        if (parts.length > 0) {
+          fullMessage = parts.join('\n\n---\n\n') + '\n\n---\n\nTASK:\n' + task.text;
+        }
+      }
+      return relay.tell(this.config, node, sessionName, fullMessage, { vimMode: this.vimMode });
     };
 
     sendTask().then((result) => {
@@ -200,11 +272,11 @@ class TaskQueue extends EventEmitter {
     return true;
   }
 
-  _handleSessionIdle(num) {
+  _handleSessionIdle(num, preview, paneCols) {
     // Complete active task for this session
     const taskId = this.activeTaskBySession.get(num);
     if (taskId) {
-      this.completeTask(taskId);
+      this.completeTask(taskId, null, preview || null, paneCols);
     }
     this.dispatchLock.delete(num);
   }
@@ -276,6 +348,14 @@ class TaskQueue extends EventEmitter {
     return Array.from(this.autoSessions).sort((a, b) => a - b);
   }
 
+  // -- VIM mode -----------------------------------------------------
+
+  setVimMode(enabled) {
+    this.vimMode = !!enabled;
+    this._saveState();
+    this.emit('vim:changed', this.vimMode);
+  }
+
   // -- Designations -------------------------------------------------
 
   setDesignation(num, designation) {
@@ -295,6 +375,88 @@ class TaskQueue extends EventEmitter {
     const obj = {};
     for (const [num, des] of this.designations) obj[num] = des;
     return obj;
+  }
+
+  // -- Designation Definitions --------------------------------------
+
+  getDesignationDefs() {
+    return Array.from(this.designationDefs.values());
+  }
+
+  setDesignationDef(name, { agentFiles, description }) {
+    if (!name) return null;
+    const def = {
+      name,
+      agentFiles: Array.isArray(agentFiles) ? agentFiles : [],
+      description: description || '',
+    };
+    this.designationDefs.set(name, def);
+    this._saveState();
+    this.emit('designationDefs:changed', this.getDesignationDefs());
+    return def;
+  }
+
+  removeDesignationDef(name) {
+    if (!this.designationDefs.has(name)) return false;
+    this.designationDefs.delete(name);
+    // Clear any session assignments using this designation
+    for (const [num, des] of this.designations) {
+      if (des === name) this.designations.delete(num);
+    }
+    this._saveState();
+    this.emit('designationDefs:changed', this.getDesignationDefs());
+    this.emit('designations:changed', this.getDesignations());
+    return true;
+  }
+
+  // -- Agent Roots + File Scanning ----------------------------------
+
+  getAgentRoots() {
+    return this.agentRoots;
+  }
+
+  setAgentRoots(roots) {
+    this.agentRoots = Array.isArray(roots) ? roots : [];
+    this._saveState();
+    this.emit('agentRoots:changed', this.agentRoots);
+  }
+
+  scanAgentFiles() {
+    const results = [];
+    for (const root of this.agentRoots) {
+      const expanded = root.replace(/^~/, os.homedir());
+      try {
+        this._scanDir(expanded, expanded, results);
+      } catch {
+        // Root doesn't exist or isn't readable
+      }
+    }
+    this.agentFilesList = results;
+    this.emit('agentFiles:scanned', this.agentFilesList);
+    return this.agentFilesList;
+  }
+
+  _scanDir(dir, root, results) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        this._scanDir(fullPath, root, results);
+      } else if (entry.name.endsWith('.md')) {
+        results.push({
+          path: fullPath,
+          name: entry.name,
+          relativePath: path.relative(root, fullPath),
+          root,
+        });
+      }
+    }
   }
 
   // -- Spawn -------------------------------------------------------
@@ -344,7 +506,7 @@ class TaskQueue extends EventEmitter {
     // Clone or create directory
     if (gitUrl) {
       try {
-        execSync(`git clone ${gitUrl} "${repoDir}"`, { timeout: 60000, stdio: 'pipe' });
+        await execAsync(`git clone ${gitUrl} "${repoDir}"`, { timeout: 300000 });
       } catch (err) {
         throw new Error(`Git clone failed: ${err.message}`);
       }
@@ -359,7 +521,7 @@ class TaskQueue extends EventEmitter {
     // Start tmux session using agent.yml template
     const agentYml = path.join(os.homedir(), 'dev', 'agents', 'tmux', 'agent.yml');
     try {
-      execSync(`/bin/zsh -lc 'tmuxinator start ${agentYml} N=${num} ROOT="${repoDir}"'`, { timeout: 15000, stdio: 'pipe' });
+      execSync(`/bin/zsh -lc 'tmuxinator start -p ${agentYml} N=${num} ROOT="${repoDir}"'`, { timeout: 15000, stdio: 'pipe' });
     } catch (err) {
       throw new Error(`Failed to start session ${num}: ${err.message}`);
     }
@@ -402,7 +564,7 @@ class TaskQueue extends EventEmitter {
       try {
         const node = this.router.nodeFor(s.name);
         if (!node) { failed++; continue; }
-        const result = await relay.tell(this.config, node, s.name, message);
+        const result = await relay.tell(this.config, node, s.name, message, { vimMode: this.vimMode });
         if (result.success) sent++;
         else failed++;
       } catch {
@@ -530,10 +692,15 @@ class TaskQueue extends EventEmitter {
 
         case 'dispatch-fix':
           if (data && data.num && this.autoSessions.has(data.num)) {
+            const pr = data.pr ? ` PR #${data.pr}` : '';
             const message = trigger === 'ci:fail'
-              ? 'CI failed. Please check the build logs and fix any issues.'
-              : 'Review changes requested. Please address the review feedback.';
-            this.createTask(message, 'manual', data.num);
+              ? `CI failed on${pr}. Run /ci-status ${data.pr || ''} to see failures, then fix them.`
+              : `Review changes requested on${pr}. Check the PR review comments and address the feedback.`;
+            this.createTask(message, 'manual', data.num, null, {
+              source: trigger === 'ci:fail' ? 'ci-fail' : 'review-changes',
+              pr: data.pr || null,
+              session: data.num,
+            });
           }
           break;
       }
@@ -564,14 +731,23 @@ class TaskQueue extends EventEmitter {
           this.spawnedAgents.set(Number(num), info);
         }
       }
+      if (Array.isArray(data.designationDefs)) {
+        for (const def of data.designationDefs) {
+          if (def.name) this.designationDefs.set(def.name, def);
+        }
+      }
+      if (Array.isArray(data.agentRoots)) {
+        this.agentRoots = data.agentRoots;
+      }
+      if (data.vimMode !== undefined) this.vimMode = data.vimMode;
       // Restore tasks
       if (Array.isArray(data.tasks)) {
         for (const t of data.tasks) {
-          // Reset dispatched tasks back to queued (session state is unknown after restart)
-          if (t.status === 'dispatched') {
-            t.status = 'queued';
-            t.assignedTo = null;
-            t.dispatchedAt = null;
+          // Preserve dispatched tasks and their session assignments across restarts.
+          // The session is still running in tmux — don't reset to queued or send /clear.
+          if (t.status === 'dispatched' && t.assignedTo) {
+            this.activeTaskBySession.set(t.assignedTo, t.id);
+            this.dispatchLock.add(t.assignedTo);
           }
           this.tasks.set(t.id, t);
           if (Number(t.id) >= nextTaskId) nextTaskId = Number(t.id) + 1;
@@ -581,7 +757,7 @@ class TaskQueue extends EventEmitter {
       if (Array.isArray(data.feed)) {
         this.feed = data.feed;
       }
-      console.log(`Loaded state: ${this.autoSessions.size} auto-sessions, ${this.designations.size} designations, ${this.spawnedAgents.size} spawned agents`);
+      console.log(`Loaded state: ${this.autoSessions.size} auto-sessions, ${this.designations.size} designations, ${this.designationDefs.size} defs, ${this.agentRoots.length} agent roots, ${this.spawnedAgents.size} spawned agents`);
       if (this.tasks.size) console.log(`Restored ${this.tasks.size} tasks`);
       if (this.feed.length) console.log(`Restored ${this.feed.length} feed entries`);
     } catch {
@@ -612,9 +788,12 @@ class TaskQueue extends EventEmitter {
       autoSessions: Array.from(this.autoSessions),
       rules: this.rules.map(r => ({ id: r.id, enabled: r.enabled })),
       designations: this.getDesignations(),
+      designationDefs: this.getDesignationDefs(),
+      agentRoots: this.agentRoots,
       spawnedAgents: spawnedObj,
       tasks: tasksArr,
       feed: this.feed,
+      vimMode: this.vimMode,
     };
     // Merge PM data if pmManager is attached
     if (this._pmManager) {
@@ -639,7 +818,7 @@ class TaskQueue extends EventEmitter {
         extra.preview = lines.slice(-20).join('\n');
       }
       this.pushFeed('state', data.num, `Session ${data.num} went idle`, extra);
-      this._handleSessionIdle(data.num);
+      this._handleSessionIdle(data.num, data.ansiSnapshot || data.preview, data.paneCols);
 
       // Evaluate auto-pilot rules
       this.evaluateRules('session:idle', data);
@@ -652,6 +831,15 @@ class TaskQueue extends EventEmitter {
 
     this.watcher.on('session:working', (data) => {
       this.pushFeed('state', data.num, `Session ${data.num} started working`);
+      // Update lastActivityAt on the active task for this session
+      const taskId = this.activeTaskBySession.get(data.num);
+      if (taskId) {
+        const task = this.tasks.get(taskId);
+        if (task) {
+          task.lastActivityAt = Date.now();
+          this.emit('task:updated', task);
+        }
+      }
     });
 
     this.watcher.on('ci:changed', (data) => {
@@ -683,7 +871,11 @@ class TaskQueue extends EventEmitter {
   getTasksList() {
     return Array.from(this.tasks.values())
       .filter(t => t.status !== 'cancelled')
-      .sort((a, b) => b.createdAt - a.createdAt);
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(t => {
+        const { snapshot, snapshotCols, ...rest } = t;
+        return rest;
+      });
   }
 }
 
