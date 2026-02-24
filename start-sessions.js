@@ -22,7 +22,7 @@ for (const n of sessionNums) {
   const cmd = `tmuxinator start -p "${templatePath}" N=${n} ROOT="${root}" --no-attach`;
   console.log(`Starting session ${n} → ${root}`);
   try {
-    execSync(cmd, { stdio: 'inherit' });
+    execSync(`/bin/zsh -lc ${JSON.stringify(cmd)}`, { stdio: 'inherit' });
   } catch (err) {
     console.error(`Failed to start session ${n}: ${err.message}`);
   }

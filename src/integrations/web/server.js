@@ -314,6 +314,11 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         const { name, nodeId } = found;
         const node = router.getNode(nodeId);
         const paneTarget = `${name}:.${config.sessions.claudePane}`;
+        // Resize tmux pane to match client terminal dimensions
+        if (msg.cols && msg.rows) {
+          console.log(`[resize] subscribe: session ${name} → ${msg.cols}x${msg.rows}`);
+          await node.exec(`tmux resize-pane -t "${paneTarget}" -x ${msg.cols} -y ${msg.rows} 2>/dev/null`);
+        }
         // Send immediately
         const content = await capturePaneAnsi(node, paneTarget);
         ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content }));
@@ -327,7 +332,16 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
             // Node may have disconnected
           }
         }, 2000);
-        termSubs.set(ws, { interval, session: msg.session });
+        termSubs.set(ws, { interval, session: msg.session, name, node });
+        break;
+      }
+
+      case 'terminal:resize': {
+        const sub = termSubs.get(ws);
+        if (!sub || !msg.cols || !msg.rows) break;
+        console.log(`[resize] resize: session ${sub.name} → ${msg.cols}x${msg.rows}`);
+        const resizeTarget = `${sub.name}:.${config.sessions.claudePane}`;
+        await sub.node.exec(`tmux resize-pane -t "${resizeTarget}" -x ${msg.cols} -y ${msg.rows} 2>/dev/null`);
         break;
       }
 

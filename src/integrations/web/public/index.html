@@ -752,7 +752,8 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
 #session-branch { font-size: 12px; color: var(--dim); }
 #restart-btn { background: var(--bg3); border: none; color: var(--orange); font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
 #restart-btn:active { background: var(--orange); color: var(--bg); }
-#terminal-wrap { flex: 1; overflow: hidden; padding: 4px; position: relative; touch-action: none; }
+#terminal-wrap { flex: 1; overflow: hidden; padding: 4px; position: relative; touch-action: none; min-height: 0; }
+#terminal-wrap .xterm { height: 100%; }
 .xterm .xterm-viewport { touch-action: pan-y !important; -webkit-overflow-scrolling: touch !important; overscroll-behavior: contain; }
 #scroll-pause { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); background: var(--purple); color: var(--bg); font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 16px; cursor: pointer; z-index: 10; opacity: 0.9; white-space: nowrap; }
 #keys-bar { display: flex; gap: 4px; padding: 6px 10px; background: var(--bg2); border-top: 1px solid var(--bg3); flex-shrink: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -1524,11 +1525,11 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
       case 'ask:done':
         askPending = false; msgInput.disabled = false; sendBtn.disabled = false; msgInput.focus();
         if (msg.success) { const dur = msg.duration ? `${Math.round(msg.duration / 1000)}s` : ''; showToast('Done', `Session ${msg.session} responded ${dur}`, 'success'); }
-        else { showToast('Error', msg.error || 'Ask failed', 'error'); }
+        else { showToast('Error', msg.error || 'Ask failed', 'error'); msgInput.value = lastSentMessage; }
         break;
       case 'tell:done':
         if (msg.success) showToast('Sent', `Message sent to session ${msg.session}`, 'success');
-        else showToast('Error', msg.error || 'Tell failed', 'error');
+        else { showToast('Error', msg.error || 'Tell failed', 'error'); msgInput.value = lastSentMessage; }
         break;
       case 'notify': handleNotify(msg); break;
       case 'restart:done': showToast('Restarted', `Session ${msg.session} — claude --resume`, 'success'); break;
@@ -1772,11 +1773,14 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
     // Show session panel
     switchTab('session-panel', fromRoute);
     if (!fromRoute) pushHash();
-    requestAnimationFrame(() => { fitAddon.fit(); term.clear(); });
-
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'terminal:subscribe', session: currentSession }));
-    }
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+      term.clear();
+      // Subscribe after fit so cols/rows reflect actual terminal size
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'terminal:subscribe', session: currentSession, cols: term.cols, rows: term.rows }));
+      }
+    });
   }
 
   let writingContent = false;
@@ -1866,8 +1870,18 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
     }
   }
 
+  let resizeTimer = null;
   window.addEventListener('resize', () => {
-    if (term && fitAddon && activeTab === 'session-panel' && activeSessionTab === 'terminal') fitAddon.fit();
+    if (term && fitAddon && activeTab === 'session-panel' && activeSessionTab === 'terminal') {
+      fitAddon.fit();
+      // Debounce: resize tmux pane to match after user stops resizing
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (ws && ws.readyState === 1 && currentSession && term) {
+          ws.send(JSON.stringify({ type: 'terminal:resize', session: currentSession, cols: term.cols, rows: term.rows }));
+        }
+      }, 300);
+    }
     if (feedPreviewFit && activeTab === 'feed-panel') feedPreviewFit.fit();
   });
 
@@ -1878,9 +1892,11 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
     modeToggle.className = mode === 'tell' ? 'tell' : '';
   });
 
+  let lastSentMessage = '';
   function sendMessage() {
     const text = msgInput.value.trim();
     if (!text || !currentSession || !ws || ws.readyState !== 1) return;
+    lastSentMessage = text;
     if (mode === 'ask') { if (askPending) return; askPending = true; msgInput.disabled = true; sendBtn.disabled = true; ws.send(JSON.stringify({ type: 'ask', session: currentSession, message: text })); }
     else { ws.send(JSON.stringify({ type: 'tell', session: currentSession, message: text })); }
     msgInput.value = '';

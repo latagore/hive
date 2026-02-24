@@ -16,7 +16,7 @@ windows:
         - >
           PROJECT_DIR=$(echo "$PWD" | sed 's|/|-|g');
           if ls ~/.claude/projects/"$PROJECT_DIR"/*.jsonl >/dev/null 2>&1;
-          then claude --resume;
+          then claude --continue;
           else claude;
           fi
         -                    # Pane 2 (top-right) — dev server

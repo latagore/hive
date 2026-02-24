@@ -290,6 +290,9 @@ sudo -u hivebot -i git config --global --add safe.directory '*'
 
 # Authenticate Claude Code (interactive — opens browser)
 sudo -u hivebot -i claude
+
+# Skip permission prompts (safe in sandbox — hivebot has no prod access)
+echo '{ "defaultMode": "bypassPermissions" }' | sudo -u hivebot tee ~/.claude/settings.json
 ```
 
 ### Clone repos and install hive
@@ -349,6 +352,23 @@ Symlinks from your home directory make this convenient:
 
 ```bash
 ln -s /Users/hivebot/ai-dev ~/ai-dev
+```
+
+### Service access (optional)
+
+Your fleet may need access to external services. Each guide covers minimal-permission setup:
+
+- **[GitHub](docs/sandbox-github.md)** — fine-grained token for push, PRs, and issues (no admin)
+- **[JIRA](docs/sandbox-jira.md)** — API token for tickets and comments (service account recommended)
+- **[AWS](docs/sandbox-aws.md)** — IAM user for CI/CD logs and deployment status (read-only by default)
+
+### Verify the sandbox
+
+Run the access audit script as both users to compare blast radius:
+
+```bash
+./check-access.sh                          # your user
+sudo -u hivebot -H ./check-access.sh      # sandbox user
 ```
 
 ### What the sandbox user CAN'T access
