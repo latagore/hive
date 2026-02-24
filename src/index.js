@@ -34,9 +34,14 @@ console.log(`Watcher started (polling every ${config.watcher.interval / 1000}s)`
 const { createBot } = require('./integrations/telegram/bot');
 createBot(config, watcher);
 
+// Local router for single-machine mode
+const { LocalRouter } = require('./core/local-node');
+const router = new LocalRouter();
+watcher.router = router;
+
 // Start task queue
 const TaskQueue = require('./core/taskqueue');
-const taskQueue = new TaskQueue(config, watcher);
+const taskQueue = new TaskQueue(config, watcher, router);
 console.log('Task queue initialized');
 
 // Patch config.sessions.repoDir to check spawned agents first
@@ -61,7 +66,7 @@ try {
 
 // Start Web dashboard
 const { createWebServer } = require('./integrations/web/server');
-const webServer = createWebServer(config, watcher, taskQueue, pmManager);
+const webServer = createWebServer(config, watcher, taskQueue, pmManager, router);
 
 // Graceful shutdown
 process.on('SIGINT', () => {

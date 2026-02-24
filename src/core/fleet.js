@@ -58,7 +58,7 @@ function ticketFromBranch(branch) {
 /**
  * Get full status for a single session.
  */
-function getSession(config, sessionName) {
+async function getSession(config, sessionName) {
   const num = sessionNum(sessionName);
   const repoDir = num ? config.sessions.repoDir(num) : null;
   const isRepo = repoDir && fs.existsSync(path.join(repoDir, '.git'));
@@ -67,12 +67,12 @@ function getSession(config, sessionName) {
   let state = num ? readState(config, num) : null;
   if (!state) {
     const paneTarget = `${sessionName}:.${config.sessions.claudePane}`;
-    const paneContent = tmux.capturePane(paneTarget, { lines: 3 });
+    const paneContent = await tmux.capturePane(paneTarget, { lines: 3 });
     state = tmux.detectState(paneContent, config);
   }
 
   // Git info
-  const git = isRepo ? tmux.gitInfo(repoDir) : { branch: '', staged: 0, modified: 0, untracked: 0 };
+  const git = isRepo ? await tmux.gitInfo(repoDir) : { branch: '', staged: 0, modified: 0, untracked: 0 };
   const ticket = ticketFromBranch(git.branch);
 
   // PR/CI from cache
@@ -89,43 +89,86 @@ function getSession(config, sessionName) {
   };
 }
 
+// Cache: { result, timestamp, pending }
+let _fleetCache = { result: null, ts: 0, pending: null };
+const FLEET_CACHE_TTL = 5000; // 5s
+
 /**
  * Get status for all fleet sessions.
+ * Cached for 5s — all concurrent callers share one result.
  */
-function getFleetStatus(config) {
-  const sessions = tmux.listSessions();
-  return sessions
-    .filter(s => config.sessions.pattern.test(s))
-    .map(s => getSession(config, s));
+async function getFleetStatus(config, _router) {
+  const now = Date.now();
+  if (_fleetCache.result && now - _fleetCache.ts < FLEET_CACHE_TTL) {
+    return _fleetCache.result;
+  }
+  // If a fetch is already in flight, piggyback on it
+  if (_fleetCache.pending) return _fleetCache.pending;
+
+  _fleetCache.pending = (async () => {
+    const t0 = Date.now();
+    const sessions = await tmux.listSessions();
+    const matching = sessions.filter(s => config.sessions.pattern.test(s));
+    // Process in batches of 4 to balance speed vs resource usage
+    const results = [];
+    for (let i = 0; i < matching.length; i += 4) {
+      const batch = matching.slice(i, i + 4);
+      const batchResults = await Promise.all(batch.map(s => getSession(config, s)));
+      results.push(...batchResults);
+    }
+    console.log(`  [perf] getFleetStatus: ${Date.now() - t0}ms`);
+    _fleetCache.result = results;
+    _fleetCache.ts = Date.now();
+    _fleetCache.pending = null;
+    return results;
+  })();
+  return _fleetCache.pending;
 }
 
 /**
  * Get Claude's pane content with TUI chrome stripped.
+ * Accepts (config, sessionName) or (config, node, sessionName).
  */
-function peekSession(config, sessionName) {
+async function peekSession(config, nodeOrName, maybeName) {
+  const sessionName = maybeName !== undefined ? maybeName : nodeOrName;
   const paneTarget = `${sessionName}:.${config.sessions.claudePane}`;
-  const content = tmux.capturePane(paneTarget);
+  const content = await tmux.capturePane(paneTarget);
   return tmux.stripTUIChrome(content, config);
 }
 
 /**
  * Find a session by number (partial match).
+ * Accepts (config, query) or (config, router, query) for compatibility with server.js.
  */
-function findSession(config, query) {
-  const sessions = tmux.listSessions().filter(s => config.sessions.pattern.test(s));
+async function findSession(config, routerOrQuery, maybeQuery) {
+  const query = maybeQuery !== undefined ? maybeQuery : routerOrQuery;
+  const allSessions = await tmux.listSessions();
+  const sessions = allSessions.filter(s => config.sessions.pattern.test(s));
+  let found = null;
   // Exact number match
   const num = parseInt(query);
   if (!isNaN(num)) {
-    return sessions.find(s => sessionNum(s) === num) || null;
+    found = sessions.find(s => sessionNum(s) === num) || null;
+  } else {
+    // Substring match
+    found = sessions.find(s => s.toLowerCase().includes(query.toLowerCase())) || null;
   }
-  // Substring match
-  return sessions.find(s => s.toLowerCase().includes(query.toLowerCase())) || null;
+  if (!found) return null;
+  return { name: found, nodeId: 'local' };
+}
+
+/**
+ * Get the config for a given node. For local nodes, returns the main config.
+ */
+function getNodeConfig(config, _nodeId) {
+  return config;
 }
 
 module.exports = {
   readCache,
   readState,
   sessionNum,
+  getNodeConfig,
   ticketFromBranch,
   getSession,
   getFleetStatus,

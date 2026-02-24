@@ -682,44 +682,62 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
     return lines.slice(-5).join('\n');
   }
 
+  // Cache for full fleet with previews (same pattern as getFleetStatus)
+  let _previewCache = { result: null, ts: 0, pending: null };
+  const PREVIEW_CACHE_TTL = 8000; // 8s (longer than fleet since previews are heavier)
+
   async function getFleetWithPreviews() {
-    const sessions = await fleet.getFleetStatus(config, router);
-    for (const s of sessions) {
-      try {
-        const node = router.nodeFor(s.name);
-        if (node) {
-          const content = await fleet.peekSession(config, node, s.name);
-          s.preview = cleanPreview(content);
-        } else {
+    const now = Date.now();
+    if (_previewCache.result && now - _previewCache.ts < PREVIEW_CACHE_TTL) {
+      return _previewCache.result;
+    }
+    if (_previewCache.pending) return _previewCache.pending;
+
+    _previewCache.pending = (async () => {
+      const t0 = Date.now();
+      const sessions = await fleet.getFleetStatus(config, router);
+      for (const s of sessions) {
+        try {
+          const node = router.nodeFor(s.name);
+          if (node) {
+            const content = await fleet.peekSession(config, node, s.name);
+            s.preview = cleanPreview(content);
+          } else {
+            s.preview = '';
+          }
+        } catch {
           s.preview = '';
         }
-      } catch {
-        s.preview = '';
+        // Git summary from already-fetched data (no extra shell calls)
+        s.gitSummary = {
+          lastCommit: '',
+          lastCommitTime: '',
+          totalChanges: s.git ? s.git.staged + s.git.modified + s.git.untracked : 0,
+        };
       }
-      // Lightweight git summary for card rendering
-      try {
-        const node = router.nodeFor(s.name);
-        const nc = fleet.getNodeConfig(config, s.nodeId);
-        const repoDir = s.num ? nc.sessions.repoDir(s.num) : null;
-        if (repoDir && node) {
-          const topLog = await git.getLog(node, repoDir, 1);
-          s.gitSummary = {
-            lastCommit: topLog.length ? topLog[0].message : '',
-            lastCommitTime: topLog.length ? topLog[0].relative : '',
-            totalChanges: (s.git ? s.git.staged + s.git.modified + s.git.untracked : 0),
-          };
-        }
-      } catch {
-        // git summary is optional
-      }
-    }
-    return sessions;
+      console.log(`[perf] getFleetWithPreviews: ${Date.now() - t0}ms`);
+      _previewCache.result = sessions;
+      _previewCache.ts = Date.now();
+      _previewCache.pending = null;
+      return sessions;
+    })();
+    return _previewCache.pending;
   }
 
   async function sendFleetStatus(ws) {
-    const sessions = await getFleetWithPreviews();
+    // Send basic status immediately so the UI renders fast
+    const t0 = Date.now();
+    const sessions = await fleet.getFleetStatus(config, router);
+    console.log(`[perf] getFleetStatus: ${Date.now() - t0}ms`);
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'fleet:status', sessions }));
+    }
+    // Then fill in previews/git summaries and send again
+    const t1 = Date.now();
+    const full = await getFleetWithPreviews();
+    console.log(`[perf] getFleetWithPreviews: ${Date.now() - t1}ms`);
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'fleet:status', sessions: full }));
     }
   }
 

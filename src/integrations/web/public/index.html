@@ -1359,7 +1359,7 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
     connBar.className = 'connecting';
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}`);
-    ws.onopen = () => { ws.send(JSON.stringify({ type: 'auth', token })); };
+    ws.onopen = () => { console.time('auth→fleet'); ws.send(JSON.stringify({ type: 'auth', token })); };
     ws.onmessage = (e) => { handleMessage(JSON.parse(e.data)); };
     ws.onclose = () => { connBar.className = 'disconnected'; authenticated = false; scheduleReconnect(); };
     ws.onerror = () => {};
@@ -1492,6 +1492,9 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
         renderFleetSearchResults(msg.query, msg.results);
         break;
       case 'fleet:status':
+        console.timeEnd('auth→fleet');
+        console.log(`fleet:status received — ${msg.sessions.length} sessions, previews: ${msg.sessions.filter(s => s.preview).length}`);
+        console.time('auth→fleet');
         fleetData = msg.sessions;
         if (activeTab === 'fleet-panel') renderGrid();
         renderSessionPicker();

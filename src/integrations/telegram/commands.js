@@ -207,8 +207,8 @@ function formatGitStatus(git) {
 
 // ── Resolve session from user input ────────────────────
 
-function resolve(config, send, query) {
-  const name = fleet.findSession(config, query);
+async function resolve(config, send, query) {
+  const name = await fleet.findSession(config, query);
   if (!name) {
     send(`<pre>? No session matching "${esc(query)}"</pre>`, HTML);
     return null;
@@ -219,7 +219,7 @@ function resolve(config, send, query) {
 // ── Commands ───────────────────────────────────────────
 
 async function status(config, send) {
-  const sessions = fleet.getFleetStatus(config);
+  const sessions = await fleet.getFleetStatus(config);
   if (sessions.length === 0) {
     send('<pre>No fleet sessions found.</pre>', HTML);
     return;
@@ -250,7 +250,7 @@ async function status(config, send) {
 }
 
 async function idle(config, send) {
-  const sessions = fleet.getFleetStatus(config).filter(s => s.state === 'idle');
+  const sessions = (await fleet.getFleetStatus(config)).filter(s => s.state === 'idle');
   if (sessions.length === 0) {
     send('<pre>No idle sessions.</pre>', HTML);
     return;
@@ -268,7 +268,7 @@ async function idle(config, send) {
 }
 
 async function working(config, send) {
-  const sessions = fleet.getFleetStatus(config).filter(s => s.state === 'working');
+  const sessions = (await fleet.getFleetStatus(config)).filter(s => s.state === 'working');
   if (sessions.length === 0) {
     send('<pre>No sessions currently working.</pre>', HTML);
     return;
@@ -289,10 +289,10 @@ async function working(config, send) {
 }
 
 async function session(config, send, query) {
-  const name = resolve(config, send, query);
+  const name = await resolve(config, send, query);
   if (!name) return;
 
-  const s = fleet.getSession(config, name);
+  const s = await fleet.getSession(config, name);
   const lines = [
     `SESSION ${s.num}`,
     '═'.repeat(42),
@@ -316,10 +316,10 @@ async function session(config, send, query) {
 }
 
 async function peek(config, send, query) {
-  const name = resolve(config, send, query);
+  const name = await resolve(config, send, query);
   if (!name) return;
 
-  const content = fleet.peekSession(config, name);
+  const content = await fleet.peekSession(config, name);
   if (!content) {
     send('<i>(empty pane)</i>', HTML);
     return;
@@ -341,7 +341,7 @@ async function peek(config, send, query) {
 }
 
 async function ask(config, send, edit, query, message) {
-  const name = resolve(config, send, query);
+  const name = await resolve(config, send, query);
   if (!name) return;
 
   const num = fleet.sessionNum(name);
@@ -384,7 +384,7 @@ async function ask(config, send, edit, query, message) {
 }
 
 async function tell(config, send, query, message) {
-  const name = resolve(config, send, query);
+  const name = await resolve(config, send, query);
   if (!name) return;
 
   const result = await relay.tell(config, name, message);
@@ -396,26 +396,26 @@ async function tell(config, send, query, message) {
 }
 
 async function restart(config, send, query) {
-  const name = resolve(config, send, query);
+  const name = await resolve(config, send, query);
   if (!name) return;
 
   const paneTarget = `${name}:.${config.sessions.claudePane}`;
-  tmux.sendKeys(paneTarget, '', false);
-  tmux.exec(`tmux send-keys -t "${paneTarget}" Escape`);
-  setTimeout(() => {
-    tmux.sendKeys(paneTarget, '/exit', true);
+  await tmux.sendKeys(paneTarget, '', false);
+  await tmux.exec(`tmux send-keys -t "${paneTarget}" Escape`);
+  setTimeout(async () => {
+    await tmux.sendKeys(paneTarget, '/exit', true);
     send(`♻️ Restarting Claude in session ${fleet.sessionNum(name)}...`, HTML);
-    setTimeout(() => {
-      tmux.sendKeys(paneTarget, 'claude --resume', true);
+    setTimeout(async () => {
+      await tmux.sendKeys(paneTarget, 'claude --resume', true);
     }, 3000);
   }, 500);
 }
 
 async function kill(config, send, query) {
-  const name = resolve(config, send, query);
+  const name = await resolve(config, send, query);
   if (!name) return;
 
-  const ok = tmux.killSession(name);
+  const ok = await tmux.killSession(name);
   if (ok) {
     send(`💀 Session ${fleet.sessionNum(name)} killed.`, HTML);
   } else {
@@ -424,7 +424,7 @@ async function kill(config, send, query) {
 }
 
 async function prs(config, send) {
-  const sessions = fleet.getFleetStatus(config).filter(s => s.pr);
+  const sessions = (await fleet.getFleetStatus(config)).filter(s => s.pr);
   if (sessions.length === 0) {
     send('<pre>No open PRs.</pre>', HTML);
     return;
