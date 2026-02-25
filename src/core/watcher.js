@@ -54,6 +54,7 @@ class Watcher extends EventEmitter {
     this.notifiedIdle = new Set(); // nums we've already emitted idle for
     this.pendingIdle = new Map();  // num -> count of consecutive idle polls (confirm at 5)
     this.seenWorking = new Set();  // nums that have been observed working at least once
+    this._pendingWorking = new Map(); // num -> count of consecutive working polls
     this.prevCI = new Map();       // num -> CI result string
     this.prevReview = new Map();   // num -> review status string
     this.detectedWaiting = new Set(); // session nums waiting for user (approvals or questions)
@@ -93,6 +94,11 @@ class Watcher extends EventEmitter {
       if (s.state === 'idle') this.notifiedIdle.add(s.num);
       if (s.pr) this.prevCI.set(s.num, s.pr.ciResult);
     }
+    // Seed git info for all sessions (runs once, in background)
+    for (const s of sessions) {
+      const node = this.router.nodeFor(s.name);
+      if (node) fleet.refreshGitInfo(this.config, node, s.name, s.nodeId).catch(() => {});
+    }
   }
 
   async _poll() {
@@ -102,11 +108,24 @@ class Watcher extends EventEmitter {
       const prevState = this.prevStates.get(s.num);
       const currState = s.state;
 
+      // Log state transitions for debugging false idle notifications
+      if (prevState && prevState !== currState) {
+        console.log(`[watcher] session ${s.num}: ${prevState} → ${currState}`);
+      }
+
       // Track sessions that have been observed working at least once.
-      // Only emit session:idle for sessions that have worked — skip sessions
-      // that were idle at startup and never did anything.
+      // Require 2 consecutive working polls to avoid false positives from
+      // momentary state detection glitches.
       if (currState === 'working') {
-        this.seenWorking.add(s.num);
+        const wc = (this._pendingWorking.get(s.num) || 0) + 1;
+        if (wc >= 2) {
+          this.seenWorking.add(s.num);
+          this._pendingWorking.delete(s.num);
+        } else {
+          this._pendingWorking.set(s.num, wc);
+        }
+      } else {
+        this._pendingWorking.delete(s.num);
       }
 
       // Detect idle with confirmation: require FIVE consecutive idle polls
@@ -121,6 +140,7 @@ class Watcher extends EventEmitter {
           const count = (this.pendingIdle.get(s.num) || 0) + 1;
           if (count >= 5) {
             // Fifth consecutive poll showing idle — confirmed idle
+            console.log(`[watcher] session ${s.num}: idle confirmed (5 polls)`);
             this.pendingIdle.delete(s.num);
             this.notifiedIdle.add(s.num);
             // Capture terminal preview so the feed entry can show context
@@ -130,6 +150,8 @@ class Watcher extends EventEmitter {
             try {
               const node = this.router.nodeFor(s.name);
               if (node) {
+                // Refresh git info now that session finished work
+                fleet.refreshGitInfo(this.config, node, s.name, s.nodeId).catch(() => {});
                 preview = await fleet.peekSession(this.config, node, s.name);
                 // Also capture ANSI version + pane width for task snapshot display
                 const paneTarget = `${s.name}:.${this.config.sessions.claudePane}`;

@@ -794,7 +794,7 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
       const sessions = await fleet.getFleetStatus(config, router);
       for (const s of sessions) {
         try {
-          const node = router.nodeFor(s.name);
+          const node = s._node || router.nodeFor(s.name);
           if (node) {
             const content = await fleet.peekSession(config, node, s.name);
             s.preview = cleanPreview(content);
@@ -811,7 +811,10 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
           totalChanges: s.git ? s.git.staged + s.git.modified + s.git.untracked : 0,
         };
       }
-      console.log(`[perf] getFleetWithPreviews: ${Date.now() - t0}ms`);
+      // Strip internal _node refs before caching/sending
+      for (const s of sessions) delete s._node;
+      const withPreview = sessions.filter(s => s.preview).length;
+      console.log(`[perf] getFleetWithPreviews: ${Date.now() - t0}ms (${withPreview}/${sessions.length} have previews)`);
       _previewCache.result = sessions;
       _previewCache.ts = Date.now();
       _previewCache.pending = null;

@@ -62,8 +62,25 @@ async function hasSession(name) {
   return (await exec(`tmux has-session -t "${name}" 2>/dev/null`)) !== null;
 }
 
+// Patterns indicating Claude finished working (spinner past tense + duration)
+const FINISHED_PATTERNS = [
+  /Baked for/,
+  /Cogitated for/,
+  /Photosynthesized for/,
+  /Galloped for/,
+  /Ruminated for/,
+  /Contemplated for/,
+  /Pondered for/,
+  /Dreamed for/,
+  /\w+ed for \d+[ms]/,   // catch-all: "<verb>ed for <duration>"
+];
+
 /**
  * Detect Claude's state from a pane capture.
+ * Checks the last few lines for idle indicators (prompt hints) OR
+ * finished indicators (spinner past tense). The prompt hints can
+ * flicker away briefly during TUI updates, so checking both prevents
+ * false "working" detections.
  * @param {string} paneContent - raw pane capture text
  * @param {object} config - hive config with idlePatterns/offPatterns
  * @returns {'idle'|'working'|'off'}
@@ -72,14 +89,19 @@ function detectState(paneContent, config) {
   const lines = paneContent.split('\n').filter(l => l.trim());
   if (lines.length === 0) return 'off';
 
-  const lastLine = lines[lines.length - 1]
-    .replace(/[^\x20-\x7E]/g, ''); // strip non-printable
+  // Check last 5 lines for idle/off/finished signals
+  const tail = lines.slice(-5).map(l => l.replace(/[^\x20-\x7E]/g, ''));
 
-  for (const pat of config.idlePatterns) {
-    if (pat.test(lastLine)) return 'idle';
-  }
-  for (const pat of config.offPatterns) {
-    if (pat.test(lastLine)) return 'off';
+  for (const line of tail) {
+    for (const pat of config.offPatterns) {
+      if (pat.test(line)) return 'off';
+    }
+    for (const pat of config.idlePatterns) {
+      if (pat.test(line)) return 'idle';
+    }
+    for (const pat of FINISHED_PATTERNS) {
+      if (pat.test(line)) return 'idle';
+    }
   }
   return 'working';
 }

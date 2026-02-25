@@ -73,8 +73,28 @@ function ticketFromBranch(branch) {
   return m ? m[1] : null;
 }
 
+// Per-session git info cache — only refreshed on idle transitions, not every poll
+const _gitCache = new Map(); // num -> { branch, staged, modified, untracked }
+const _defaultGit = { branch: '', staged: 0, modified: 0, untracked: 0 };
+
+/**
+ * Refresh git info for a session and update the cache.
+ * Called when a session transitions to idle (not on every poll).
+ */
+async function refreshGitInfo(config, node, sessionName, nodeId) {
+  const nc = getNodeConfig(config, nodeId);
+  const num = sessionNum(sessionName);
+  const repoDir = num ? nc.sessions.repoDir(num) : null;
+  const isRepo = repoDir ? await node.fileExists(path.join(repoDir, '.git')) : false;
+  const git = isRepo ? await node.gitInfo(repoDir) : { ..._defaultGit };
+  if (num) _gitCache.set(num, git);
+  return git;
+}
+
 /**
  * Get full status for a single session.
+ * Uses cached git info to avoid expensive git operations on every poll.
+ * Call refreshGitInfo() when a session goes idle to update the cache.
  * @param {object} config - hive config
  * @param {Node} node - execution node
  * @param {string} sessionName - tmux session name
@@ -83,19 +103,17 @@ function ticketFromBranch(branch) {
 async function getSession(config, node, sessionName, nodeId) {
   const nc = getNodeConfig(config, nodeId);
   const num = sessionNum(sessionName);
-  const repoDir = num ? nc.sessions.repoDir(num) : null;
-  const isRepo = repoDir ? await node.fileExists(path.join(repoDir, '.git')) : false;
 
   // Claude state -- prefer cached state file, fall back to live detection
   let state = num ? await readState(nc.cache, node, num) : null;
   if (!state) {
     const paneTarget = `${sessionName}:.${nc.sessions.claudePane}`;
-    const paneContent = await node.capturePane(paneTarget, { lines: 3 });
+    const paneContent = await node.capturePane(paneTarget, { lines: 8 });
     state = tmux.detectState(paneContent, config);
   }
 
-  // Git info
-  const git = isRepo ? await node.gitInfo(repoDir) : { branch: '', staged: 0, modified: 0, untracked: 0 };
+  // Git info — use cache (refreshed on idle transitions only)
+  const git = (num && _gitCache.has(num)) ? _gitCache.get(num) : { ..._defaultGit };
   const ticket = ticketFromBranch(git.branch);
 
   // PR/CI from cache
@@ -130,7 +148,8 @@ async function getFleetStatus(config, router) {
   return Promise.all(matching.map(async ({ name, nodeId }) => {
     const node = router.getNode(nodeId);
     const session = await getSession(config, node, name, nodeId);
-    return { ...session, nodeId };
+    // Attach node reference so callers don't need nodeFor() (which races with cache clears)
+    return { ...session, nodeId, _node: node };
   }));
 }
 
@@ -176,6 +195,7 @@ module.exports = {
   ticketFromBranch,
   getSession,
   getFleetStatus,
+  refreshGitInfo,
   peekSession,
   findSession,
 };
