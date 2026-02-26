@@ -2310,7 +2310,7 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
   function writeTerminalContent(content) {
     if (!term) return;
     lastContent = content; writingContent = true;
-    term.reset(); term.write(content);
+    term.write('\x1b[H' + content + '\x1b[J');
     requestAnimationFrame(() => { term.scrollToBottom(); requestAnimationFrame(() => { writingContent = false; }); });
   }
 
