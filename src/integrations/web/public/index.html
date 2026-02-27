@@ -2561,7 +2561,7 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
   function writeTerminalContent(content) {
     if (!term) return;
     lastContent = content; writingContent = true;
-    term.reset(); term.write(content);
+    term.write('\x1b[H\x1b[J' + content);
     requestAnimationFrame(() => { term.scrollToBottom(); requestAnimationFrame(() => { writingContent = false; }); });
   }
 
@@ -3044,8 +3044,7 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
   function writeTasksSessionContent(content) {
     ensureTasksSessionTerm();
     tsLastContent = content; tsWriting = true;
-    tasksSessionTerm.reset();
-    tasksSessionTerm.write(content);
+    tasksSessionTerm.write('\x1b[H\x1b[J' + content);
     requestAnimationFrame(() => { tasksSessionTerm.scrollToBottom(); requestAnimationFrame(() => { tsWriting = false; }); });
   }
 
@@ -3180,8 +3179,7 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
   function showTaskSnapshotContent(taskId, content, cols) {
     ensureTasksSessionTerm();
     if (cols && cols > 0) { tsPaneCols = cols; if (cols !== tasksSessionTerm.cols) tasksSessionTerm.resize(cols, tasksSessionTerm.rows); }
-    tasksSessionTerm.reset();
-    tasksSessionTerm.write(content);
+    tasksSessionTerm.write('\x1b[H\x1b[J' + content);
     requestAnimationFrame(() => tasksSessionTerm.scrollToBottom());
   }
 
@@ -4556,8 +4554,7 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
 
   function writeFeedPreviewContent(content) {
     ensureFeedPreviewTerm();
-    feedPreviewTerm.reset();
-    feedPreviewTerm.write(content);
+    feedPreviewTerm.write('\x1b[H\x1b[J' + content);
     requestAnimationFrame(() => feedPreviewTerm.scrollToBottom());
   }
 

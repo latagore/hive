@@ -441,11 +441,16 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         // Send immediately
         const { content: subContent, cols: subCols } = await capturePaneAnsi(node, paneTarget);
         ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content: subContent, cols: subCols }));
-        // Poll every 2s
+        // Poll every 2s — only send when content actually changed
+        let lastSentContent = subContent;
+        let lastSentCols = subCols;
         const interval = setInterval(async () => {
           if (ws.readyState !== 1) { clearTermSub(ws); return; }
           try {
             const { content: pollContent, cols: pollCols } = await capturePaneAnsi(node, paneTarget);
+            if (pollContent === lastSentContent && pollCols === lastSentCols) return;
+            lastSentContent = pollContent;
+            lastSentCols = pollCols;
             ws.send(JSON.stringify({ type: 'terminal:data', session: msg.session, content: pollContent, cols: pollCols }));
           } catch {
             // Node may have disconnected
