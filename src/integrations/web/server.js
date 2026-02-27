@@ -662,6 +662,14 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
         break;
       }
 
+      case 'task:rename': {
+        if (!taskQueue) break;
+        if (!msg.taskId || !msg.text) break;
+        const renamedTask = taskQueue.renameTask(msg.taskId, msg.text);
+        if (renamedTask) broadcast({ type: 'task:updated', task: renamedTask });
+        break;
+      }
+
       case 'task:snapshot': {
         if (!taskQueue) break;
         const snapTask = taskQueue.tasks.get(msg.taskId);

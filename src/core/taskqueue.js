@@ -184,6 +184,15 @@ class TaskQueue extends EventEmitter {
     return task;
   }
 
+  renameTask(taskId, text) {
+    const task = this.tasks.get(taskId);
+    if (!task) return null;
+    task.text = text;
+    this.emit('task:updated', task);
+    this._saveState();
+    return task;
+  }
+
   /**
    * Manually dispatch a queued task to a specific session.
    */

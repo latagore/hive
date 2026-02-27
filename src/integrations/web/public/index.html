@@ -453,6 +453,11 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
   font-weight: 600; cursor: pointer; padding: 2px 6px;
 }
 .task-edit-btn:hover { color: var(--purple); }
+.task-rename-btn {
+  background: none; border: none; color: var(--dim); font-size: 11px;
+  font-weight: 600; cursor: pointer; padding: 2px 6px;
+}
+.task-rename-btn:hover { color: var(--purple); }
 .task-assign-btn {
   background: none; border: none; color: var(--green); font-size: 11px;
   font-weight: 700; cursor: pointer; padding: 2px 6px;
@@ -3402,6 +3407,20 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
       btn.addEventListener('click', (e) => { e.stopPropagation(); openTaskDialog(btn.dataset.id); });
     });
 
+    // Wire rename buttons (all tabs)
+    tasksScroll.querySelectorAll('.task-rename-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const taskId = btn.dataset.id;
+        const task = tasks.find(t => t.id === taskId);
+        if (!task) return;
+        const newText = prompt('Rename task:', task.text);
+        if (newText && newText.trim() && newText.trim() !== task.text) {
+          ws.send(JSON.stringify({ type: 'task:rename', taskId, text: newText.trim() }));
+        }
+      });
+    });
+
     // Wire assign buttons (queued tab)
     tasksScroll.querySelectorAll('.task-assign-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -3570,9 +3589,10 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
           waitBadge = `<span style="color:${color};font-weight:700;font-size:11px">waiting ${waitStr}</span>`;
         }
       }
+      const renameBtn = '<button class="task-rename-btn" data-id="' + t.id + '">Rename</button>';
       const linkBtn = `<button class="task-link-btn" data-id="${t.id}" title="Copy link">&#128279;</button>`;
       const checked = selectedTaskIds.has(t.id) ? ' checked' : '';
-      return `<div class="task-card-row"><input type="checkbox" class="task-checkbox" data-id="${t.id}"${checked}><div class="task-card dispatched${selected}" data-id="${t.id}"><div class="task-text">${esc(t.text)}</div><div class="task-meta"><span>${meta} · ${ago}</span>${waitBadge}${sourceBadge}${desigBadge}${prBadge}${clBadge}${commentBadge}${linkBtn}${sessionBadge}</div></div></div>`;
+      return `<div class="task-card-row"><input type="checkbox" class="task-checkbox" data-id="${t.id}"${checked}><div class="task-card dispatched${selected}" data-id="${t.id}"><div class="task-text">${esc(t.text)}</div><div class="task-meta"><span>${meta} · ${ago}</span>${waitBadge}${sourceBadge}${desigBadge}${prBadge}${clBadge}${commentBadge}${linkBtn}${renameBtn}${sessionBadge}</div></div></div>`;
     }
     if (tabType === 'queued') {
       const editBtn = hasPerm('create-tasks') ? `<button class="task-edit-btn" data-id="${t.id}">Edit</button>` : '';
@@ -3589,9 +3609,10 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
     if (t.assignedTo) meta += ` · session ${t.assignedTo}`;
     if (t.status === 'failed') meta += ' · failed';
     const snippet = t.result ? `<div class="task-text" style="font-size:12px;color:var(--dim);margin-top:2px">${esc(t.result.substring(0, 80))}</div>` : '';
+    const renameBtn = '<button class="task-rename-btn" data-id="' + t.id + '">Rename</button>';
     const linkBtn = `<button class="task-link-btn" data-id="${t.id}" title="Copy link">&#128279;</button>`;
     const checked = selectedTaskIds.has(t.id) ? ' checked' : '';
-    return `<div class="task-card-row"><input type="checkbox" class="task-checkbox" data-id="${t.id}"${checked}><div class="task-card ${t.status}${selected}" data-id="${t.id}"><div class="task-text">${esc(t.text)}</div>${snippet}<div class="task-meta"><span>${meta} · ${ago}</span>${sourceBadge}${prBadge}${originBadge}${desigBadge}${clBadge}${commentBadge}${linkBtn}</div></div></div>`;
+    return `<div class="task-card-row"><input type="checkbox" class="task-checkbox" data-id="${t.id}"${checked}><div class="task-card ${t.status}${selected}" data-id="${t.id}"><div class="task-text">${esc(t.text)}</div>${snippet}<div class="task-meta"><span>${meta} · ${ago}</span>${sourceBadge}${prBadge}${originBadge}${desigBadge}${clBadge}${commentBadge}${linkBtn}${renameBtn}</div></div></div>`;
   }
 
   // ── Comment panel (rendered into tab content divs) ─────
