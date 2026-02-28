@@ -105,6 +105,24 @@ class TaskQueue extends EventEmitter {
   // -- Task lifecycle -----------------------------------------------
 
   createTask(text, mode, targetSession, designation, meta) {
+    // If session already has an active task, update it instead of creating a duplicate
+    if (mode === 'manual' && targetSession) {
+      const existingTaskId = this.activeTaskBySession.get(targetSession);
+      if (existingTaskId) {
+        const existing = this.tasks.get(existingTaskId);
+        if (existing && (existing.status === 'dispatched' || existing.status === 'queued')) {
+          existing.text = text;
+          existing.lastActivityAt = Date.now();
+          if (designation) existing.designation = designation;
+          if (meta && meta.createdBy) existing.createdBy = meta.createdBy;
+          this.emit('task:updated', existing);
+          this.pushFeed('task', targetSession, `Task renamed on session ${targetSession}: "${text}"`);
+          this._saveState();
+          return existing;
+        }
+      }
+    }
+
     const task = {
       id: String(nextTaskId++),
       text,
@@ -128,21 +146,6 @@ class TaskQueue extends EventEmitter {
     this.pushFeed('task', null, `Task created${byWho}: "${text}" (${mode})`);
 
     if (mode === 'manual' && targetSession) {
-      // If session already has an active task, rename it instead of dispatching a duplicate
-      const existingTaskId = this.activeTaskBySession.get(targetSession);
-      if (existingTaskId) {
-        const existing = this.tasks.get(existingTaskId);
-        if (existing && (existing.status === 'dispatched' || existing.status === 'queued')) {
-          existing.text = text;
-          existing.lastActivityAt = Date.now();
-          // Remove the new task we just created — the existing one is updated
-          this.tasks.delete(task.id);
-          this.emit('task:updated', existing);
-          this.pushFeed('task', targetSession, `Task renamed on session ${targetSession}: "${text}"`);
-          this._saveState();
-          return existing;
-        }
-      }
       this._dispatchTask(task, targetSession).catch(err =>
         log.error('Dispatch error:', err.message));
     } else if (mode === 'auto') {
@@ -166,6 +169,9 @@ class TaskQueue extends EventEmitter {
       if (existing && (existing.status === 'dispatched' || existing.status === 'queued')) {
         existing.text = text;
         existing.lastActivityAt = Date.now();
+        if (meta && meta.source) existing.source = meta.source;
+        if (meta && meta.pr) existing.sourcePR = meta.pr;
+        if (meta && meta.session) existing.sourceSession = meta.session;
         this.emit('task:updated', existing);
         this.pushFeed('task', sessionNum, `Task renamed on session ${sessionNum}: "${text}"`);
         this._saveState();
