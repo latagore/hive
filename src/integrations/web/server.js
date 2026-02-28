@@ -664,9 +664,12 @@ function createWebServer(config, watcher, taskQueue, pmManager, router) {
 
       case 'task:rename': {
         if (!taskQueue) break;
+        if (!checkPermission(ws, user, 'create-tasks')) break;
         if (!msg.taskId || !msg.text) break;
-        const renamedTask = taskQueue.renameTask(msg.taskId, msg.text);
-        if (renamedTask) broadcast({ type: 'task:updated', task: renamedTask });
+        const trimmedName = String(msg.text).trim().slice(0, 500);
+        if (!trimmedName) break;
+        taskQueue.renameTask(msg.taskId, trimmedName);
+        // Broadcast handled by event bridge below
         break;
       }
 

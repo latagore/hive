@@ -187,7 +187,9 @@ class TaskQueue extends EventEmitter {
   renameTask(taskId, text) {
     const task = this.tasks.get(taskId);
     if (!task) return null;
+    const oldText = task.text;
     task.text = text;
+    this.pushFeed('task', task.assignedTo, `Task renamed: "${oldText}" → "${text}"`);
     this.emit('task:updated', task);
     this._saveState();
     return task;
